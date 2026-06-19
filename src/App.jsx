@@ -764,7 +764,6 @@ export default function Memflix() {
       ...(fileObj ? { fileURL, fileType, fileName } : {}),
     };
     await dbPut("media", updated);
-    setAllMedia((prev) => prev.map((m) => (m.id === editItem.id ? updated : m)));
     if (heroItem?.id === editItem.id) setHeroItem(updated);
     setShowAddModal(false);
     setEditItem(null);
@@ -797,7 +796,6 @@ export default function Memflix() {
       await dbPut("media", entry);
       newEntries.push(entry);
     }
-    setAllMedia((prev) => [...prev, ...newEntries]);
     if (targetProfile.id === activeProfile?.id) setHeroItem(newEntries[newEntries.length - 1]);
     setBulkUploading(false);
     setBulkFiles([]);
@@ -812,10 +810,8 @@ export default function Memflix() {
   // ── Delete ───────────────────────────────────────────────────────
   const deleteMedia = async (id) => {
     await dbDelete("media", id);
-    const updated = allMedia.filter((m) => m.id !== id);
-    setAllMedia(updated);
     if (heroItem?.id === id) {
-      const remaining = updated.filter((m) => m.profileId === activeProfile.id);
+      const remaining = allMedia.filter((m) => m.id !== id && m.profileId === activeProfile.id);
       setHeroItem(remaining[0] || null);
     }
     setConfirm(null);
@@ -825,8 +821,6 @@ export default function Memflix() {
     await dbDelete("profiles", id);
     const mediaToDelete = allMedia.filter((m) => m.profileId === id);
     for (const m of mediaToDelete) await dbDelete("media", m.id);
-    setProfiles((prev) => prev.filter((p) => p.id !== id));
-    setAllMedia((prev) => prev.filter((m) => m.profileId !== id));
     setConfirm(null);
     if (screen === "browser" && activeProfile?.id === id) goBack();
   };
@@ -842,7 +836,6 @@ export default function Memflix() {
       const idx = profiles.length % PALETTE.length;
       const p = { id: `p_${Date.now()}`, year: y, colorIdx: idx, order: profiles.length };
       await dbPut("profiles", p);
-      setProfiles((prev) => [...prev, p]);
       setShowAddYear(false);
       setNewYear("");
     } finally {
@@ -854,8 +847,7 @@ export default function Memflix() {
   const handleMusicUpload = async (categoryId, file) => {
     if (!file) return;
     try {
-      const track = await dbSaveMusic(categoryId, file, file.name);
-      setCategoryMusicTracks((prev) => ({ ...prev, [categoryId]: track }));
+      await dbSaveMusic(categoryId, file, file.name);
     } catch (err) {
       console.error("Failed to save music:", err);
     }
