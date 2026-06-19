@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 // ── IndexedDB helpers ──────────────────────────────────────────────
 const DB_NAME = "memflix_db";
-const DB_VER = 2;
+const DB_VER = 4;
 
 function openDB() {
   return new Promise((res, rej) => {
@@ -15,6 +15,8 @@ function openDB() {
         db.createObjectStore("media", { keyPath: "id" });
       if (!db.objectStoreNames.contains("categories"))
         db.createObjectStore("categories", { keyPath: "id" });
+      if (!db.objectStoreNames.contains("musicTracks"))
+        db.createObjectStore("musicTracks", { keyPath: "id" });
     };
     req.onsuccess = (e) => res(e.target.result);
     req.onerror = (e) => rej(e.target.error);
@@ -51,7 +53,6 @@ async function dbDelete(store, id) {
   });
 }
 
-// Get all unique categories
 async function dbGetCategories() {
   const db = await openDB();
   return new Promise((res, rej) => {
@@ -62,11 +63,26 @@ async function dbGetCategories() {
   });
 }
 
-// Add a category
 async function dbAddCategory(name) {
   const id = `cat_${Date.now()}`;
   await dbPut("categories", { id, name });
   return id;
+}
+
+// Save music as base64 so it persists across sessions
+async function dbSaveMusic(categoryId, fileBlob, fileName) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const base64 = e.target.result; // data:audio/...;base64,...
+      const id = `music_${categoryId}`;
+      const track = { id, categoryId, base64, fileName };
+      await dbPut("musicTracks", track);
+      resolve(track);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(fileBlob);
+  });
 }
 
 // ── Constants ──────────────────────────────────────────────────────
@@ -95,7 +111,6 @@ const S = {
     color: "#e5e5e5",
     overflow: "hidden",
   },
-  // intro
   intro: {
     display: "flex", flexDirection: "column", alignItems: "center",
     justifyContent: "center", minHeight: "100vh",
@@ -125,7 +140,6 @@ const S = {
     transition: "border-color 0.2s, transform 0.2s",
   },
   profileLabel: { fontSize: "13px", color: "#888", transition: "color 0.2s" },
-  // nav
   nav: {
     position: "sticky", top: 0, zIndex: 50,
     display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -155,7 +169,6 @@ const S = {
     fontSize: "13px", outline: "none", width: "clamp(80px, 15vw, 160px)",
     fontFamily: "'Georgia', serif",
   },
-  // hero
   hero: {
     position: "relative", width: "100%",
     height: "clamp(220px, 40vw, 400px)", overflow: "hidden",
@@ -198,7 +211,6 @@ const S = {
     cursor: "pointer", border: "none", transition: "opacity 0.2s, transform 0.15s",
     letterSpacing: "0.5px",
   },
-  // media section
   section: { padding: "1.2rem clamp(1rem, 4vw, 2rem)" },
   sectionTitle: {
     fontSize: "14px", fontWeight: "600", color: "#aaa",
@@ -223,7 +235,6 @@ const S = {
     fontSize: "11px", color: "#ccc", padding: "6px 8px 8px",
     background: "#1a1a1a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
   },
-  // add btn
   addBtn: {
     width: "100%", padding: "14px",
     border: "1.5px dashed rgba(255,255,255,0.15)", borderRadius: "8px",
@@ -232,7 +243,6 @@ const S = {
     letterSpacing: "1px", transition: "border-color 0.2s, color 0.2s",
     fontFamily: "'Georgia', serif",
   },
-  // modal overlay — normal flow faux-viewport so fixed doesn't collapse
   modalOverlay: {
     position: "fixed", inset: 0,
     background: "rgba(0,0,0,0.88)", display: "flex",
@@ -266,32 +276,139 @@ const S = {
     transition: "border-color 0.2s, color 0.2s",
   },
   modalActions: { display: "flex", gap: "8px", marginTop: "1.2rem" },
-  // slideshow
   slideshowOverlay: {
     position: "fixed", inset: 0, background: "#000",
     display: "flex", alignItems: "center", justifyContent: "center",
     zIndex: 300, flexDirection: "column",
   },
-  // empty state
   empty: { color: "#444", fontSize: "13px", padding: "2rem 0", gridColumn: "1/-1", textAlign: "center" },
 };
+
+// ── Confetti Component ─────────────────────────────────────────────
+function ConfettiPiece({ style }) {
+  return <div style={style} />;
+}
+
+// ── Intro Animation ────────────────────────────────────────────────
+function IntroAnimation({ onDone }) {
+  const [phase, setPhase] = useState("zoom"); // zoom | burst | fade
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase("burst"), 1200);
+    const t2 = setTimeout(() => setPhase("fade"), 2800);
+    const t3 = setTimeout(() => onDone(), 3600);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [onDone]);
+
+  const confettiColors = ["#e50914", "#fff", "#ffb81c", "#1e90ff", "#ff69b4", "#00ff88", "#ff6600", "#cc00ff"];
+  const pieces = Array.from({ length: 60 }, (_, i) => ({
+    id: i,
+    color: confettiColors[i % confettiColors.length],
+    left: `${Math.random() * 100}%`,
+    delay: `${Math.random() * 0.8}s`,
+    duration: `${1.5 + Math.random() * 1.5}s`,
+    size: `${6 + Math.random() * 10}px`,
+    rotation: Math.random() * 720,
+    isStreamer: i % 5 === 0,
+  }));
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "#000",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      zIndex: 9999, overflow: "hidden",
+      opacity: phase === "fade" ? 0 : 1,
+      transition: phase === "fade" ? "opacity 0.8s ease-out" : "none",
+    }}>
+      <style>{`
+        @keyframes mZoomIn {
+          0% { transform: scale(0.05); opacity: 0; filter: blur(20px); }
+          60% { transform: scale(1.15); opacity: 1; filter: blur(0); }
+          100% { transform: scale(1); opacity: 1; filter: blur(0); }
+        }
+        @keyframes confettiFall {
+          0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+          100% { transform: translateY(110vh) rotate(var(--rot)); opacity: 0.3; }
+        }
+        @keyframes streamerFall {
+          0% { transform: translateY(-20px) rotate(0deg) scaleX(1); opacity: 1; }
+          50% { transform: translateY(50vh) rotate(180deg) scaleX(0.8); }
+          100% { transform: translateY(110vh) rotate(360deg) scaleX(1.2); opacity: 0; }
+        }
+        @keyframes glowPulse {
+          0%, 100% { text-shadow: 0 0 40px rgba(229,9,20,0.6), 0 0 80px rgba(229,9,20,0.3); }
+          50% { text-shadow: 0 0 80px rgba(229,9,20,1), 0 0 160px rgba(229,9,20,0.6), 0 0 240px rgba(229,9,20,0.3); }
+        }
+        .netflix-row::-webkit-scrollbar { display: none; }
+      `}</style>
+
+      {/* M Logo */}
+      <div style={{
+        fontSize: "clamp(120px, 25vw, 220px)",
+        fontWeight: "900",
+        color: "#e50914",
+        fontFamily: "'Georgia', serif",
+        letterSpacing: "-8px",
+        animation: "mZoomIn 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards, glowPulse 1s ease-in-out 1.2s infinite",
+        userSelect: "none",
+        position: "relative", zIndex: 2,
+      }}>M</div>
+
+      {/* Confetti & Streamers */}
+      {phase !== "zoom" && pieces.map((p) => (
+        <div key={p.id} style={{
+          position: "absolute",
+          left: p.left,
+          top: "-30px",
+          width: p.isStreamer ? "4px" : p.size,
+          height: p.isStreamer ? `${40 + Math.random() * 60}px` : p.size,
+          background: p.color,
+          borderRadius: p.isStreamer ? "2px" : "2px",
+          "--rot": `${p.rotation}deg`,
+          animation: `${p.isStreamer ? "streamerFall" : "confettiFall"} ${p.duration} ${p.delay} ease-in forwards`,
+          zIndex: 1,
+          opacity: 0,
+        }} />
+      ))}
+
+      {/* Tagline */}
+      {phase === "burst" && (
+        <div style={{
+          position: "absolute", bottom: "20%", left: "50%",
+          transform: "translateX(-50%)",
+          color: "#aaa", fontSize: "clamp(12px, 2vw, 16px)",
+          letterSpacing: "6px", textTransform: "uppercase",
+          animation: "mZoomIn 0.6s ease-out forwards",
+          whiteSpace: "nowrap",
+        }}>
+          Your Memory Archive
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── Main App ───────────────────────────────────────────────────────
 export default function Memflix() {
   const [profiles, setProfiles] = useState([]);
   const [allMedia, setAllMedia] = useState([]);
-  const [screen, setScreen] = useState("intro"); // intro | browser
+  const [screen, setScreen] = useState("intro");
   const [activeProfile, setActiveProfile] = useState(null);
   const [isAdminMode, setIsAdminMode] = useState(false);
   const [heroItem, setHeroItem] = useState(null);
   const [search, setSearch] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
-  const [editItem, setEditItem] = useState(null); // for re-record/edit
+  const [editItem, setEditItem] = useState(null);
   const [modalState, setModalState] = useState({ title: "", summary: "", category: "", fileURL: null, fileType: null, fileName: "" });
+  // Bulk upload state
+  const [bulkFiles, setBulkFiles] = useState([]); // [{ id, title, fileURL, fileType, fileName }]
+  const [bulkCategory, setBulkCategory] = useState("");
+  const [bulkSummary, setBulkSummary] = useState("");
+  const [bulkUploading, setBulkUploading] = useState(false);
   const [showSlideshow, setShowSlideshow] = useState(false);
   const [slideshowIdx, setSlideshowIdx] = useState(0);
   const [slideshowPlay, setSlideshowPlay] = useState(true);
-  const [confirm, setConfirm] = useState(null); // { id, label }
+  const [confirm, setConfirm] = useState(null);
   const [showAddYear, setShowAddYear] = useState(false);
   const [newYear, setNewYear] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -300,10 +417,37 @@ export default function Memflix() {
   const [adminPassword, setAdminPassword] = useState("");
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [modeSelectionProfile, setModeSelectionProfile] = useState(null);
+
+  // Music state
+  const [musicVolume, setMusicVolume] = useState(0.7);
+  const [musicPlaying, setMusicPlaying] = useState(true);
+  const [categoryMusicTracks, setCategoryMusicTracks] = useState({});
+  const [activeMusicCategory, setActiveMusicCategory] = useState(null);
+  const audioRef = useRef(null);
+  const musicSavedTimeRef = useRef(0); // persists playback position across photo/video switches
+  const currentMusicCatRef = useRef(null); // track what category is currently loaded
+
+  // Viewing state
+  const [viewingPhoto, setViewingPhoto] = useState(null); // { id, idx }
+  const [isViewingPhoto, setIsViewingPhoto] = useState(false); // true = showing photo
+  const [viewerCategory, setViewerCategory] = useState(null); // category locked when viewer opens
+
+  // Idle slideshow
+  const [isIdle, setIsIdle] = useState(false);
+  const [idleSlideshowIdx, setIdleSlideshowIdx] = useState(0);
+  const [idleSlides, setIdleSlides] = useState([]);
+
+  // Intro animation
+  const [showIntro, setShowIntro] = useState(true);
+  const [showMusicPrompt, setShowMusicPrompt] = useState(false);
+
+  const idleTimer = useRef(null);
+  const idleSlideshowTimer = useRef(null);
   const slideshowTimer = useRef(null);
   const fileInputRef = useRef(null);
+  const musicUploadRef = useRef(null);
 
-  // Load from IndexedDB
+  // ── Load from IndexedDB ──────────────────────────────────────────
   useEffect(() => {
     (async () => {
       let ps = await dbGetAll("profiles");
@@ -316,15 +460,123 @@ export default function Memflix() {
       if (cats.length === 0) {
         const defaultCats = ["Featured", "Action", "Drama", "Comedy", "Family"];
         for (const cat of defaultCats) await dbAddCategory(cat);
-        cats = await dbGetCategories();
       }
       ps.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       setProfiles(ps);
       setAllMedia(ms);
+
+      const allMusic = await dbGetAll("musicTracks");
+      const musicMap = {};
+      for (const track of allMusic) musicMap[track.categoryId] = track;
+      setCategoryMusicTracks(musicMap);
+
       setLoaded(true);
     })();
   }, []);
 
+  // ── Music Engine ─────────────────────────────────────────────────
+  // The audio element persists. We manage when to play/pause based on:
+  // - whether we're viewing a PHOTO (play) vs VIDEO (pause, save position)
+  // - category changes (load new track, reset position)
+  // - volume changes
+  // - user-toggled mute
+
+  useEffect(() => {
+    if (!audioRef.current) return;
+    audioRef.current.volume = musicVolume;
+  }, [musicVolume]);
+
+  // Central music controller — runs whenever anything relevant changes
+  useEffect(() => {
+    if (!audioRef.current) return;
+    const track = categoryMusicTracks[selectedCategory];
+
+    if (track && track.base64 && !isAdminMode && screen === "browser" && !showMusicPrompt) {
+      // Load a new track if category changed
+      if (currentMusicCatRef.current !== selectedCategory) {
+        currentMusicCatRef.current = selectedCategory;
+        musicSavedTimeRef.current = 0;
+        audioRef.current.src = track.base64;
+        audioRef.current.currentTime = 0;
+        setActiveMusicCategory(selectedCategory);
+      }
+      audioRef.current.volume = musicVolume;
+
+      if (musicPlaying) {
+        audioRef.current.play().catch(() => {});
+      } else {
+        musicSavedTimeRef.current = audioRef.current.currentTime;
+        audioRef.current.pause();
+      }
+    } else {
+      // No track, admin mode, prompt showing, or not on browser — pause
+      audioRef.current.pause();
+      if (!track || !track.base64) {
+        currentMusicCatRef.current = null;
+        setActiveMusicCategory(null);
+      }
+    }
+  }, [selectedCategory, categoryMusicTracks, isAdminMode, screen, musicPlaying, showMusicPrompt]);
+
+  // When switching between photo view and video view (pause on video fullscreen)
+  useEffect(() => {
+    if (!audioRef.current) return;
+    const track = categoryMusicTracks[selectedCategory];
+    if (!track || !track.base64 || isAdminMode) return;
+    if (!isViewingPhoto && viewingPhoto !== null) {
+      // fullscreen video — pause and save
+      musicSavedTimeRef.current = audioRef.current.currentTime;
+      audioRef.current.pause();
+    }
+  }, [isViewingPhoto, viewingPhoto]);
+
+
+
+  // ── Idle Detection ───────────────────────────────────────────────
+  useEffect(() => {
+    if (screen !== "browser" || isAdminMode) return;
+
+    const resetIdle = () => {
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+      if (isIdle) setIsIdle(false);
+      idleTimer.current = setTimeout(() => {
+        // Pick random category with photos
+        const photos = allMedia.filter((m) => m.fileType === "photo");
+        if (photos.length === 0) return;
+        const cats = [...new Set(photos.map((m) => m.category))];
+        const randomCat = cats[Math.floor(Math.random() * cats.length)];
+        const slides = photos.filter((m) => m.category === randomCat);
+        setIdleSlides(slides);
+        setIdleSlideshowIdx(0);
+        setIsIdle(true);
+      }, 30000);
+    };
+
+    window.addEventListener("mousemove", resetIdle);
+    window.addEventListener("keydown", resetIdle);
+    window.addEventListener("click", resetIdle);
+    window.addEventListener("touchstart", resetIdle);
+    resetIdle();
+
+    return () => {
+      window.removeEventListener("mousemove", resetIdle);
+      window.removeEventListener("keydown", resetIdle);
+      window.removeEventListener("click", resetIdle);
+      window.removeEventListener("touchstart", resetIdle);
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+    };
+  }, [screen, isAdminMode, allMedia, isIdle]);
+
+  // Idle slideshow advance every 4 seconds
+  useEffect(() => {
+    if (!isIdle || idleSlides.length === 0) return;
+    idleSlideshowTimer.current = setTimeout(() => {
+      setIdleSlideshowIdx((i) => (i + 1) % idleSlides.length);
+    }, 4000);
+    return () => clearTimeout(idleSlideshowTimer.current);
+  }, [isIdle, idleSlideshowIdx, idleSlides.length]);
+
+  // ── Profile helpers ──────────────────────────────────────────────
   const profileMedia = (profileId, q = "", cat = "All") => {
     let ms = allMedia.filter((m) => m.profileId === profileId);
     if (cat !== "All") ms = ms.filter((m) => m.category === cat);
@@ -336,35 +588,36 @@ export default function Memflix() {
     );
   };
 
-  // Get unique categories for active profile
   const getProfileCategories = (profileId) => {
     const cats = new Set(allMedia.filter((m) => m.profileId === profileId).map((m) => m.category || "Uncategorized"));
     return ["All", ...Array.from(cats).filter((c) => c !== "All").sort()];
   };
 
-  const openProfile = (p) => {
-    setModeSelectionProfile(p);
-  };
+  const openProfile = (p) => setModeSelectionProfile(p);
 
   const confirmMode = (mode) => {
     if (mode === "admin") {
       setShowAdminPassword(true);
     } else {
-      // Viewer mode - direct access
       setActiveProfile(modeSelectionProfile);
       setIsAdminMode(false);
       setSearch("");
       setSelectedCategory("All");
+      currentMusicCatRef.current = null;
+      musicSavedTimeRef.current = 0;
       const first = allMedia.filter((m) => m.profileId === modeSelectionProfile.id)[0] || null;
       setHeroItem(first);
+      // Determine initial state
+      setIsViewingPhoto(false);
+      setViewingPhoto(null);
       setScreen("browser");
       setModeSelectionProfile(null);
+      setShowMusicPrompt(true);
     }
   };
 
   const submitAdminPassword = () => {
     if (adminPassword === "KeM_JNo0u2") {
-      // Correct password
       setActiveProfile(modeSelectionProfile);
       setIsAdminMode(true);
       setSearch("");
@@ -381,71 +634,200 @@ export default function Memflix() {
     }
   };
 
-  const goBack = () => { setScreen("intro"); setActiveProfile(null); setHeroItem(null); setIsAdminMode(false); setAdminTargetProfile(null); setModeSelectionProfile(null); };
+  const goBack = () => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+    currentMusicCatRef.current = null;
+    musicSavedTimeRef.current = 0;
+    setActiveMusicCategory(null);
+    setScreen("intro");
+    setActiveProfile(null);
+    setHeroItem(null);
+    setIsAdminMode(false);
+    setAdminTargetProfile(null);
+    setModeSelectionProfile(null);
+    setIsViewingPhoto(false);
+    setViewingPhoto(null);
+    setViewerCategory(null);
+    setIsIdle(false);
+  };
 
-  // ── Add / Edit ──
+  // ── Photo viewer ─────────────────────────────────────────────────
+  const getViewerPhotos = useCallback(() => {
+    if (!activeProfile) return [];
+    const cat = viewerCategory || selectedCategory;
+    return profileMedia(activeProfile.id, search, cat).filter((m) => m.fileType === "photo");
+  }, [activeProfile, allMedia, search, selectedCategory, viewerCategory]);
+
+  const openPhotoViewer = (mediaItem) => {
+    // Lock navigation to this item's category
+    const cat = mediaItem.category || "Uncategorized";
+    setViewerCategory(cat);
+    const catPhotos = profileMedia(activeProfile.id, search, cat).filter((m) => m.fileType === "photo");
+    const idx = catPhotos.findIndex((p) => p.id === mediaItem.id);
+    setViewingPhoto({ id: mediaItem.id, idx: idx >= 0 ? idx : 0 });
+    setIsViewingPhoto(true);
+  };
+
+  const closePhotoViewer = () => {
+    setIsViewingPhoto(false);
+    setViewingPhoto(null);
+    setViewerCategory(null);
+    // If we're in "All" view, switch back to banner song
+    if (selectedCategory === "All" && audioRef.current && !isAdminMode) {
+      const bannerTrack = categoryMusicTracks["banner"] || categoryMusicTracks["Banner"];
+      if (bannerTrack && bannerTrack.base64) {
+        if (currentMusicCatRef.current !== "banner") {
+          currentMusicCatRef.current = "banner";
+          musicSavedTimeRef.current = 0;
+          audioRef.current.src = bannerTrack.base64;
+          audioRef.current.volume = musicVolume;
+          audioRef.current.currentTime = 0;
+          setActiveMusicCategory("banner");
+        }
+        if (musicPlaying) audioRef.current.play().catch(() => {});
+      } else {
+        // No banner track — stop music
+        audioRef.current.pause();
+        currentMusicCatRef.current = null;
+        setActiveMusicCategory(null);
+      }
+    }
+  };
+
+  const navigatePhoto = (dir) => {
+    const photos = getViewerPhotos();
+    if (photos.length === 0) return;
+    setViewingPhoto((prev) => {
+      const newIdx = (prev.idx + dir + photos.length) % photos.length;
+      return { id: photos[newIdx].id, idx: newIdx };
+    });
+  };
+
+  // Handle keyboard arrow navigation in photo viewer
+  useEffect(() => {
+    if (!isViewingPhoto) return;
+    const handleKey = (e) => {
+      if (e.key === "ArrowLeft") navigatePhoto(-1);
+      if (e.key === "ArrowRight") navigatePhoto(1);
+      if (e.key === "Escape") closePhotoViewer();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [isViewingPhoto, getViewerPhotos]);
+
+  // ── Add / Edit ───────────────────────────────────────────────────
   const openAdd = (item = null) => {
     if (item) {
       setEditItem(item);
       setModalState({ title: item.title, summary: item.summary, category: item.category || "", fileURL: item.fileURL, fileType: item.fileType, fileName: item.fileName || "" });
+      setBulkFiles([]);
     } else {
       setEditItem(null);
       setModalState({ title: "", summary: "", category: "", fileURL: null, fileType: null, fileName: "" });
+      setBulkFiles([]);
+      setBulkCategory("");
+      setBulkSummary("");
     }
     setShowAddModal(true);
   };
 
+  // Read a File into a data-URL entry for bulk preview
+  const readFileAsEntry = (file) =>
+    new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => resolve({
+        id: `bf_${Date.now()}_${Math.random()}`,
+        fileName: file.name,
+        fileType: file.type.startsWith("video") ? "video" : "photo",
+        fileURL: ev.target.result,
+        title: file.name.replace(/\.[^.]+$/, ""),
+      });
+      reader.readAsDataURL(file);
+    });
+
+  // Multi-file pick (bulk mode)
+  const handleBulkFiles = async (e) => {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+    const entries = await Promise.all(files.map(readFileAsEntry));
+    setBulkFiles((prev) => [...prev, ...entries]);
+    e.target.value = "";
+  };
+
+  // Single-file pick (edit mode)
   const handleFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const url = URL.createObjectURL(file);
-    const type = file.type.startsWith("video") ? "video" : "photo";
-    setModalState((s) => ({
-      ...s, fileURL: url, fileType: type, fileName: file.name,
-      title: s.title || file.name.replace(/\.[^.]+$/, ""),
-    }));
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setModalState((s) => ({
+        ...s,
+        fileURL: ev.target.result,
+        fileType: file.type.startsWith("video") ? "video" : "photo",
+        fileName: file.name,
+        title: s.title || file.name.replace(/\.[^.]+$/, ""),
+      }));
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
   };
 
-  const saveMedia = async () => {
+  // Save edited single item
+  const saveEditedMedia = async () => {
     const { title, summary, category, fileURL, fileType, fileName } = modalState;
     if (!title.trim()) return;
-    const targetProfile = adminTargetProfile || activeProfile;
-    if (editItem) {
-      const updated = {
-        ...editItem,
-        title: title.trim(),
-        summary: summary.trim() || "A cherished memory.",
-        category: category.trim() || "Uncategorized",
-        ...(fileURL && fileURL !== editItem.fileURL ? { fileURL, fileType, fileName } : {}),
-      };
-      await dbPut("media", updated);
-      setAllMedia((prev) => prev.map((m) => (m.id === editItem.id ? updated : m)));
-      if (heroItem?.id === editItem.id) setHeroItem(updated);
-    } else {
-      const entry = {
-        id: `m_${Date.now()}`,
-        profileId: targetProfile.id,
-        title: title.trim(),
-        summary: summary.trim() || "A cherished memory.",
-        category: category.trim() || "Uncategorized",
-        fileURL: fileURL || null,
-        fileType: fileType || "photo",
-        fileName: fileName || "",
-        createdAt: Date.now(),
-      };
-      await dbPut("media", entry);
-      const updated = [...allMedia, entry];
-      setAllMedia(updated);
-      if (targetProfile.id === activeProfile?.id) {
-        setHeroItem(entry);
-      }
-    }
+    const updated = {
+      ...editItem,
+      title: title.trim(),
+      summary: summary.trim() || "A cherished memory.",
+      category: category.trim() || "Uncategorized",
+      ...(fileURL && fileURL !== editItem.fileURL ? { fileURL, fileType, fileName } : {}),
+    };
+    await dbPut("media", updated);
+    setAllMedia((prev) => prev.map((m) => (m.id === editItem.id ? updated : m)));
+    if (heroItem?.id === editItem.id) setHeroItem(updated);
     setShowAddModal(false);
     setEditItem(null);
     setAdminTargetProfile(null);
   };
 
-  // ── Delete ──
+  // Save all bulk files at once
+  const saveBulkMedia = async () => {
+    if (bulkFiles.length === 0) return;
+    setBulkUploading(true);
+    const targetProfile = adminTargetProfile || activeProfile;
+    const cat = bulkCategory.trim() || "Uncategorized";
+    const sum = bulkSummary.trim() || "A cherished memory.";
+    const newEntries = [];
+    for (let i = 0; i < bulkFiles.length; i++) {
+      const bf = bulkFiles[i];
+      const entry = {
+        id: `m_${Date.now()}_${i}`,
+        profileId: targetProfile.id,
+        title: (bf.title || bf.fileName).trim(),
+        summary: sum,
+        category: cat,
+        fileURL: bf.fileURL,
+        fileType: bf.fileType,
+        fileName: bf.fileName,
+        createdAt: Date.now() + i,
+      };
+      await dbPut("media", entry);
+      newEntries.push(entry);
+    }
+    setAllMedia((prev) => [...prev, ...newEntries]);
+    if (targetProfile.id === activeProfile?.id) setHeroItem(newEntries[newEntries.length - 1]);
+    setBulkUploading(false);
+    setBulkFiles([]);
+    setBulkCategory("");
+    setBulkSummary("");
+    setShowAddModal(false);
+    setAdminTargetProfile(null);
+  };
+
+  const saveMedia = editItem ? saveEditedMedia : saveBulkMedia;
+
+  // ── Delete ───────────────────────────────────────────────────────
   const deleteMedia = async (id) => {
     await dbDelete("media", id);
     const updated = allMedia.filter((m) => m.id !== id);
@@ -467,7 +849,7 @@ export default function Memflix() {
     if (screen === "browser" && activeProfile?.id === id) goBack();
   };
 
-  // ── Add year ──
+  // ── Add year ─────────────────────────────────────────────────────
   const addYear = async () => {
     const y = newYear.trim();
     if (!y) return;
@@ -479,7 +861,18 @@ export default function Memflix() {
     setNewYear("");
   };
 
-  // ── Slideshow ──
+  // ── Music upload ─────────────────────────────────────────────────
+  const handleMusicUpload = async (categoryId, file) => {
+    if (!file) return;
+    try {
+      const track = await dbSaveMusic(categoryId, file, file.name);
+      setCategoryMusicTracks((prev) => ({ ...prev, [categoryId]: track }));
+    } catch (err) {
+      console.error("Failed to save music:", err);
+    }
+  };
+
+  // ── Slideshow (manual) ───────────────────────────────────────────
   const currentMedia = activeProfile ? profileMedia(activeProfile.id, search, selectedCategory) : [];
   const startSlideshow = () => {
     if (currentMedia.length === 0) return;
@@ -487,6 +880,7 @@ export default function Memflix() {
     setSlideshowPlay(true);
     setShowSlideshow(true);
   };
+
   useEffect(() => {
     if (!showSlideshow || !slideshowPlay || currentMedia.length === 0) return;
     slideshowTimer.current = setTimeout(() => {
@@ -498,6 +892,9 @@ export default function Memflix() {
   const ssItem = currentMedia[slideshowIdx];
   const pal = (p) => PALETTE[p?.colorIdx ?? 0];
 
+  const viewerPhotos = getViewerPhotos();
+  const currentViewerPhoto = viewingPhoto ? viewerPhotos[viewingPhoto.idx] : null;
+
   if (!loaded) return (
     <div style={{ ...S.app, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
       <div style={{ color: "#e50914", fontSize: "14px", letterSpacing: "3px" }}>LOADING…</div>
@@ -506,7 +903,161 @@ export default function Memflix() {
 
   return (
     <div style={S.app}>
-      {/* ── INTRO ─────────────────────────────────── */}
+      {/* Persistent Audio */}
+      <audio
+        ref={audioRef}
+        loop
+        onEnded={() => { if (audioRef.current) audioRef.current.play().catch(() => {}); }}
+      />
+
+      {/* ── INTRO ANIMATION ──────────────────────── */}
+      {showIntro && <IntroAnimation onDone={() => setShowIntro(false)} />}
+
+      {/* ── IDLE SLIDESHOW ───────────────────────── */}
+      {isIdle && idleSlides.length > 0 && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "#000", zIndex: 1000, cursor: "pointer" }}
+          onClick={() => setIsIdle(false)}
+        >
+          {idleSlides[idleSlideshowIdx % idleSlides.length]?.fileURL && (
+            <img
+              src={idleSlides[idleSlideshowIdx % idleSlides.length].fileURL}
+              alt="idle"
+              style={{ width: "100%", height: "100%", objectFit: "cover", opacity: 0.8 }}
+            />
+          )}
+          <div style={{
+            position: "absolute", inset: 0,
+            background: "linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 50%)",
+          }} />
+          <div style={{ position: "absolute", top: "24px", left: "50%", transform: "translateX(-50%)", color: "#e50914", fontSize: "11px", letterSpacing: "4px", textTransform: "uppercase" }}>
+            MEMFLIX
+          </div>
+          <div style={{ position: "absolute", bottom: "60px", left: "50%", transform: "translateX(-50%)", textAlign: "center" }}>
+            <div style={{ fontSize: "clamp(14px, 2.5vw, 22px)", fontWeight: "600", marginBottom: "6px", color: "#fff" }}>
+              {idleSlides[idleSlideshowIdx % idleSlides.length]?.title}
+            </div>
+            <div style={{ fontSize: "12px", color: "#aaa" }}>
+              {idleSlides[idleSlideshowIdx % idleSlides.length]?.category}
+            </div>
+          </div>
+          <div style={{ position: "absolute", bottom: "20px", left: "50%", transform: "translateX(-50%)", color: "#555", fontSize: "11px", letterSpacing: "2px" }}>
+            TAP ANYWHERE TO CONTINUE
+          </div>
+          {/* Progress dots */}
+          <div style={{ position: "absolute", bottom: "40px", left: "50%", transform: "translateX(-50%)", display: "flex", gap: "6px" }}>
+            {idleSlides.map((_, i) => (
+              <div key={i} style={{
+                width: i === idleSlideshowIdx % idleSlides.length ? "20px" : "6px",
+                height: "4px", borderRadius: "2px",
+                background: i === idleSlideshowIdx % idleSlides.length ? "#e50914" : "rgba(255,255,255,0.3)",
+                transition: "all 0.3s",
+              }} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── PHOTO VIEWER ─────────────────────────── */}
+      {isViewingPhoto && currentViewerPhoto && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.97)",
+            display: "flex", flexDirection: "column", alignItems: "center",
+            justifyContent: "center", zIndex: 800,
+          }}
+          onClick={closePhotoViewer}
+        >
+          {/* Close button */}
+          <button
+            style={{
+              position: "absolute", top: "20px", right: "20px",
+              background: "rgba(229,9,20,0.8)", border: "none", color: "#fff",
+              width: "42px", height: "42px", borderRadius: "50%", cursor: "pointer",
+              fontSize: "20px", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 802,
+            }}
+            onClick={(e) => { e.stopPropagation(); closePhotoViewer(); }}
+          >×</button>
+
+          {/* Music indicator */}
+          {(categoryMusicTracks[activeMusicCategory] || categoryMusicTracks[selectedCategory]) && (
+            <div style={{
+              position: "absolute", top: "20px", left: "20px",
+              display: "flex", alignItems: "center", gap: "8px",
+              background: "rgba(229,9,20,0.2)", border: "1px solid rgba(229,9,20,0.4)",
+              borderRadius: "20px", padding: "6px 14px", fontSize: "11px", color: "#e50914",
+              letterSpacing: "1px",
+            }}>
+              <span style={{ animation: musicPlaying ? "none" : "none" }}>
+                {musicPlaying ? "♫" : "♪"}
+              </span>
+              {(categoryMusicTracks[activeMusicCategory] || categoryMusicTracks[selectedCategory])?.fileName || "Music playing"}
+            </div>
+          )}
+
+          {/* Image */}
+          <div
+            style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", flex: 1, width: "100%", maxWidth: "90vw" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              key={currentViewerPhoto.id}
+              src={currentViewerPhoto.fileURL}
+              alt={currentViewerPhoto.title}
+              style={{
+                maxWidth: "calc(100% - 140px)", maxHeight: "75vh",
+                objectFit: "contain", borderRadius: "4px",
+                transition: "opacity 0.2s",
+              }}
+            />
+
+            {/* Left Arrow */}
+            {viewerPhotos.length > 1 && (
+              <button
+                style={{
+                  position: "absolute", left: "10px", top: "50%", transform: "translateY(-50%)",
+                  background: "rgba(229,9,20,0.7)", border: "none", color: "#fff",
+                  width: "52px", height: "52px", borderRadius: "50%", cursor: "pointer",
+                  fontSize: "28px", display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.15s", zIndex: 801,
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#e50914"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "rgba(229,9,20,0.7)"}
+                onClick={(e) => { e.stopPropagation(); navigatePhoto(-1); }}
+              >‹</button>
+            )}
+
+            {/* Right Arrow */}
+            {viewerPhotos.length > 1 && (
+              <button
+                style={{
+                  position: "absolute", right: "10px", top: "50%", transform: "translateY(-50%)",
+                  background: "rgba(229,9,20,0.7)", border: "none", color: "#fff",
+                  width: "52px", height: "52px", borderRadius: "50%", cursor: "pointer",
+                  fontSize: "28px", display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.15s", zIndex: 801,
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#e50914"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "rgba(229,9,20,0.7)"}
+                onClick={(e) => { e.stopPropagation(); navigatePhoto(1); }}
+              >›</button>
+            )}
+          </div>
+
+          {/* Photo info + counter — clicking here also closes viewer */}
+          <div
+            style={{ width: "100%", padding: "16px 20px", textAlign: "center" }}
+          >
+            <div style={{ fontSize: "16px", fontWeight: "600", marginBottom: "4px" }}>{currentViewerPhoto.title}</div>
+            <div style={{ fontSize: "12px", color: "#aaa", marginBottom: "10px", maxWidth: "500px", margin: "0 auto 10px" }}>{currentViewerPhoto.summary}</div>
+            <div style={{ fontSize: "11px", color: "#555" }}>
+              {viewingPhoto.idx + 1} / {viewerPhotos.length} · {currentViewerPhoto.category || "Uncategorized"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── INTRO SCREEN ─────────────────────────── */}
       {screen === "intro" && (
         <div style={S.intro}>
           <div style={S.logo}>MEMFLIX</div>
@@ -531,7 +1082,6 @@ export default function Memflix() {
                 </div>
               );
             })}
-            {/* Add account card */}
             <div style={S.profileCard}
               onMouseEnter={(e) => { e.currentTarget.querySelector(".pa2").style.borderColor = "#e50914"; }}
               onMouseLeave={(e) => { e.currentTarget.querySelector(".pa2").style.borderColor = "rgba(255,255,255,0.1)"; }}
@@ -551,14 +1101,11 @@ export default function Memflix() {
             <div style={{ fontSize: "13px", color: "#aaa", marginBottom: "1rem", lineHeight: 1.6 }}>
               Enter password to access admin mode:
             </div>
-            <input 
-              type="password"
-              style={S.input} 
-              value={adminPassword} 
+            <input
+              type="password" style={S.input} value={adminPassword}
               onChange={(e) => setAdminPassword(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && submitAdminPassword()}
-              placeholder="Enter password…" 
-              autoFocus 
+              placeholder="Enter password…" autoFocus
             />
             <div style={{ ...S.modalActions, marginTop: "1.2rem" }}>
               <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#2a2a2a", color: "#aaa", fontFamily: "'Georgia', serif" }}
@@ -590,6 +1137,54 @@ export default function Memflix() {
         </div>
       )}
 
+      {/* ── MUSIC UNLOCK PROMPT ────────────────── */}
+      {showMusicPrompt && screen === "browser" && (
+        <div
+          onClick={() => {
+            setShowMusicPrompt(false);
+            // Directly play inside a user gesture — this is the browser unlock
+            const track = categoryMusicTracks[selectedCategory] ||
+              Object.values(categoryMusicTracks)[0];
+            if (track && track.base64 && audioRef.current && !isAdminMode) {
+              audioRef.current.src = track.base64;
+              audioRef.current.volume = musicVolume;
+              audioRef.current.currentTime = 0;
+              const cat = Object.keys(categoryMusicTracks).find(k => categoryMusicTracks[k] === track) || selectedCategory;
+              currentMusicCatRef.current = cat;
+              audioRef.current.play().catch(() => {});
+              setActiveMusicCategory(cat);
+            }
+          }}
+          style={{
+            position: "fixed", inset: 0, zIndex: 900,
+            background: "rgba(0,0,0,0.85)", backdropFilter: "blur(6px)",
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center",
+            cursor: "pointer",
+          }}
+        >
+          <div style={{
+            width: "80px", height: "80px", borderRadius: "50%",
+            background: "rgba(229,9,20,0.15)", border: "2px solid #e50914",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: "32px", marginBottom: "20px",
+            animation: "mPulse 1.4s ease-in-out infinite",
+          }}>♫</div>
+          <div style={{ fontSize: "22px", fontWeight: "700", color: "#fff", letterSpacing: "2px", marginBottom: "10px" }}>
+            Tap to enter
+          </div>
+          <div style={{ fontSize: "13px", color: "#888", letterSpacing: "1px" }}>
+            Music will play automatically
+          </div>
+          <style>{`
+            @keyframes mPulse {
+              0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(229,9,20,0.4); }
+              50% { transform: scale(1.08); box-shadow: 0 0 0 16px rgba(229,9,20,0); }
+            }
+          `}</style>
+        </div>
+      )}
+
       {/* ── BROWSER ───────────────────────────────── */}
       {screen === "browser" && activeProfile && (() => {
         const c = pal(activeProfile);
@@ -605,8 +1200,7 @@ export default function Memflix() {
               </div>
               <div style={S.searchWrap}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#888" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input style={S.searchInput} placeholder="Search memories…"
-                  value={search} onChange={(e) => setSearch(e.target.value)} />
+                <input style={S.searchInput} placeholder="Search memories…" value={search} onChange={(e) => setSearch(e.target.value)} />
                 {search && <button style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: "16px", lineHeight: 1 }} onClick={() => setSearch("")}>×</button>}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -615,7 +1209,7 @@ export default function Memflix() {
               </div>
             </div>
 
-            {/* Admin Panel - Only in Admin Mode */}
+            {/* Admin Panel */}
             {isAdminMode && (
               <div style={{ padding: "clamp(1rem, 4vw, 2rem)", background: "rgba(229,9,20,0.08)", borderBottom: "1px solid rgba(229,9,20,0.2)" }}>
                 <div style={{ fontSize: "12px", color: "#e50914", letterSpacing: "1px", textTransform: "uppercase", marginBottom: "12px", fontWeight: "600" }}>📤 Upload to:</div>
@@ -630,7 +1224,7 @@ export default function Memflix() {
                           border: isTarget ? "2px solid #e50914" : "1px solid rgba(255,255,255,0.1)",
                           background: isTarget ? "rgba(229,9,20,0.2)" : "rgba(255,255,255,0.05)",
                           color: isTarget ? "#fff" : "#aaa", fontSize: "12px", cursor: "pointer",
-                          fontFamily: "'Georgia', serif", transition: "all 0.2s"
+                          fontFamily: "'Georgia', serif", transition: "all 0.2s",
                         }}
                         onClick={() => setAdminTargetProfile(isTarget ? null : p)}>
                         {p.year}
@@ -638,115 +1232,274 @@ export default function Memflix() {
                     );
                   })}
                 </div>
-              </div>
-            )}
 
-            {/* Category Filter - Only in Viewer or when no admin panel */}
-            {!isAdminMode && categories.length > 1 && (
-              <div style={{ padding: "12px clamp(1rem, 4vw, 2rem)", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", gap: "8px", overflowX: "auto", scrollBehavior: "smooth" }}>
-                {categories.map((cat) => (
-                  <button key={cat}
-                    style={{
-                      padding: "6px 12px", borderRadius: "20px",
-                      border: selectedCategory === cat ? "1px solid #e50914" : "1px solid rgba(255,255,255,0.2)",
-                      background: selectedCategory === cat ? "rgba(229,9,20,0.3)" : "transparent",
-                      color: selectedCategory === cat ? "#fff" : "#888", fontSize: "11px", cursor: "pointer",
-                      fontFamily: "'Georgia', serif", transition: "all 0.2s", whiteSpace: "nowrap"
-                    }}
-                    onClick={() => setSelectedCategory(cat)}>
-                    {cat}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Hero */}
-            <div style={S.hero}>
-              {heroItem?.fileURL ? (
-                heroItem.fileType === "video"
-                  ? <video key={heroItem.id} style={S.heroMedia} src={heroItem.fileURL} autoPlay muted loop playsInline />
-                  : <img key={heroItem.id} style={S.heroMedia} src={heroItem.fileURL} alt={heroItem.title} />
-              ) : (
-                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="1"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+                {/* Category Music Management */}
+                <div style={{ marginTop: "16px", paddingTop: "12px", borderTop: "1px solid rgba(255,255,255,0.1)" }}>
+                  <div style={{ fontSize: "11px", color: "#e50914", letterSpacing: "1px", textTransform: "uppercase", marginBottom: "10px", fontWeight: "600" }}>♫ Category Music</div>
+                  <div style={{ fontSize: "11px", color: "#555", marginBottom: "8px" }}>Click a category to assign background music for photos in that category.</div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {categories.filter((c) => c !== "All").map((cat) => (
+                      <button key={cat}
+                        style={{
+                          padding: "6px 10px", borderRadius: "4px",
+                          border: "1px solid rgba(255,255,255,0.1)",
+                          background: categoryMusicTracks[cat] ? "rgba(229,9,20,0.3)" : "rgba(255,255,255,0.05)",
+                          color: categoryMusicTracks[cat] ? "#fff" : "#aaa",
+                          fontSize: "10px", cursor: "pointer", fontFamily: "'Georgia', serif",
+                          transition: "all 0.2s", display: "flex", alignItems: "center", gap: "4px",
+                        }}
+                        onClick={() => {
+                          const input = musicUploadRef.current;
+                          if (input) {
+                            input.setAttribute("data-category", cat);
+                            input.click();
+                          }
+                        }}
+                        title={categoryMusicTracks[cat] ? `${categoryMusicTracks[cat].fileName} — click to change` : "Click to add music"}>
+                        {cat}
+                        {categoryMusicTracks[cat] && <span>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                  <input ref={musicUploadRef} type="file" accept="audio/*" style={{ display: "none" }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const cat = musicUploadRef.current?.getAttribute("data-category");
+                        if (cat) handleMusicUpload(cat, file);
+                      }
+                      e.target.value = "";
+                    }} />
                 </div>
-              )}
-              <div style={S.heroGradient} />
-              <div style={S.heroInfo}>
-                <div style={{ ...S.heroBadge, background: c.accent || "#e50914" }}>{heroItem?.category || activeProfile.year}</div>
-                <div style={S.heroTitle}>{heroItem?.title || "Select a memory"}</div>
-                <div style={S.heroSummary}>{heroItem?.summary || "Click any card below to feature it here."}</div>
-                {heroItem && (
-                  <div style={S.heroActions}>
-                    <button style={{ ...S.heroBtn, background: "#fff", color: "#000" }}
-                      onClick={() => heroItem.fileURL && window.open(heroItem.fileURL, "_blank")}>
-                      ▶ Open
-                    </button>
-                    <button style={{ ...S.heroBtn, background: "rgba(100,100,100,0.5)", color: "#fff" }}
-                      onClick={startSlideshow}>
-                      ⧉ Slideshow
-                    </button>
-                    <button style={{ ...S.heroBtn, background: "rgba(100,100,100,0.3)", color: "#fff" }}
-                      onClick={() => openAdd(heroItem)}>
-                      ✎ Edit
-                    </button>
-                  </div>
-                )}
               </div>
-            </div>
+            )}
 
-            {/* Media grid */}
-            <div style={S.section}>
-              <div style={S.sectionTitle}>
-                {selectedCategory !== "All" ? selectedCategory : activeProfile.year} memories {search && `· "${search}"`} ({filtered.length})
-              </div>
-              <div style={S.mediaGrid}>
-                {filtered.length === 0 && (
-                  <div style={S.empty}>
-                    {search ? "No memories match your search." : "No memories yet — add your first!"}
+            {/* Category Filter + Volume */}
+            {!isAdminMode && categories.length > 1 && (
+              <div>
+                <div style={{ padding: "12px clamp(1rem, 4vw, 2rem)", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", gap: "8px", overflowX: "auto", scrollBehavior: "smooth", alignItems: "center" }}>
+                  {categories.map((cat) => (
+                    <button key={cat}
+                      style={{
+                        padding: "6px 12px", borderRadius: "20px",
+                        border: selectedCategory === cat ? "1px solid #e50914" : "1px solid rgba(255,255,255,0.2)",
+                        background: selectedCategory === cat ? "rgba(229,9,20,0.3)" : "transparent",
+                        color: selectedCategory === cat ? "#fff" : "#888",
+                        fontSize: "11px", cursor: "pointer", fontFamily: "'Georgia', serif",
+                        transition: "all 0.2s", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px",
+                      }}
+                      onClick={() => {
+                        setSelectedCategory(cat);
+                        // Reset photo viewer when switching categories
+                        setIsViewingPhoto(false);
+                        setViewingPhoto(null);
+                        // Music engine picks up via useEffect on selectedCategory
+                      }}>
+                      {cat}
+                      {cat !== "All" && categoryMusicTracks[cat] && <span style={{ color: "#e50914" }}>♫</span>}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Music Volume Bar — shown whenever there's a track for the current category */}
+                {categoryMusicTracks[selectedCategory] && (
+                  <div style={{
+                    padding: "8px clamp(1rem, 4vw, 2rem)",
+                    display: "flex", alignItems: "center", gap: "12px",
+                    background: "rgba(229,9,20,0.08)",
+                    borderBottom: "1px solid rgba(255,255,255,0.06)",
+                  }}>
+                    <button
+                      style={{ background: "none", border: "none", color: "#e50914", cursor: "pointer", fontSize: "16px", padding: "4px 6px", lineHeight: 1 }}
+                      onClick={() => setMusicPlaying((p) => !p)}
+                      title={musicPlaying ? "Pause music" : "Play music"}>
+                      {musicPlaying ? "🔊" : "🔇"}
+                    </button>
+                    <div style={{ display: "flex", flexDirection: "column", flex: 1, gap: "2px" }}>
+                      <span style={{ fontSize: "10px", color: "#666", letterSpacing: "1px" }}>
+                        ♫ {categoryMusicTracks[selectedCategory].fileName || "Background music"}
+                        {!isViewingPhoto && <span style={{ color: "#555", marginLeft: "8px" }}>— paused while viewing video</span>}
+                      </span>
+                      <input
+                        type="range" min="0" max="100" value={Math.round(musicVolume * 100)}
+                        onChange={(e) => setMusicVolume(parseFloat(e.target.value) / 100)}
+                        style={{ cursor: "pointer", accentColor: "#e50914" }}
+                      />
+                    </div>
+                    <span style={{ color: "#888", fontSize: "11px", minWidth: "30px", textAlign: "right" }}>{Math.round(musicVolume * 100)}%</span>
                   </div>
                 )}
-                {filtered.map((m) => (
-                  <div key={m.id} style={{ position: "relative" }}>
-                    <div style={{
+              </div>
+            )}
+
+            {/* ── NETFLIX-STYLE LAYOUT ── */}
+            {(() => {
+              // Separate banner items from rest
+              const bannerItems = filtered.filter((m) => (m.category || "").toLowerCase() === "banner");
+              const nonBannerItems = filtered.filter((m) => (m.category || "").toLowerCase() !== "banner");
+
+              // Pick hero: banner category first, then heroItem, then first item
+              const bannerHero = bannerItems[0] || heroItem || filtered[0] || null;
+
+              // Group non-banner items by category
+              const catOrder = [];
+              const catMap = {};
+              nonBannerItems.forEach((m) => {
+                const cat = m.category || "Uncategorized";
+                if (!catMap[cat]) { catMap[cat] = []; catOrder.push(cat); }
+                catMap[cat].push(m);
+              });
+
+              // Render a single media card
+              // Switch music to the category of the clicked item (works inside user gesture)
+              const playTrackForCategory = (cat) => {
+                if (!audioRef.current || isAdminMode) return;
+                const track = categoryMusicTracks[cat];
+                if (!track || !track.base64) {
+                  // No track for this category — stop music
+                  audioRef.current.pause();
+                  currentMusicCatRef.current = null;
+                  setActiveMusicCategory(null);
+                  return;
+                }
+                if (currentMusicCatRef.current !== cat) {
+                  currentMusicCatRef.current = cat;
+                  musicSavedTimeRef.current = 0;
+                  audioRef.current.src = track.base64;
+                  audioRef.current.volume = musicVolume;
+                  audioRef.current.currentTime = 0;
+                  setActiveMusicCategory(cat);
+                }
+                if (musicPlaying) audioRef.current.play().catch(() => {});
+              };
+
+              const renderCard = (m) => (
+                <div key={m.id} style={{ position: "relative", flexShrink: 0 }}>
+                  <div
+                    style={{
                       ...S.mediaCard,
+                      width: "clamp(130px, 18vw, 200px)",
                       borderColor: heroItem?.id === m.id ? (c.accent || "#e50914") : "transparent",
                     }}
-                      onClick={() => setHeroItem(m)}>
-                      <div style={S.mediaThumb}>
-                        {m.fileURL ? (
-                          m.fileType === "video"
-                            ? <video src={m.fileURL} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted />
-                            : <img src={m.fileURL} style={{ width: "100%", height: "100%", objectFit: "cover" }} alt={m.title} />
-                        ) : (
-                          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#444" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
-                        )}
-                        {m.fileType === "video" && (
-                          <div style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.7)", borderRadius: "3px", padding: "2px 5px", fontSize: "9px", color: "#ccc", letterSpacing: "1px" }}>VID</div>
-                        )}
-                      </div>
-                      <div style={{ ...S.mediaLabel, display: "flex", justifyContent: "space-between", alignItems: "center", gap: "4px" }}>
-                        <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.title}</span>
-                        {m.category && m.category !== "Uncategorized" && (
-                          <span style={{ fontSize: "9px", background: "rgba(229,9,20,0.3)", color: "#e50914", padding: "2px 6px", borderRadius: "3px", whiteSpace: "nowrap" }}>{m.category}</span>
-                        )}
-                      </div>
+                    onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.05)"; e.currentTarget.style.zIndex = "10"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.zIndex = "1"; }}
+                    onClick={() => {
+                      const cat = m.category || "Uncategorized";
+                      playTrackForCategory(cat);
+                      if (!isAdminMode && m.fileType === "photo") {
+                        openPhotoViewer(m);
+                      } else {
+                        setHeroItem(m);
+                        if (m.fileType === "video") setIsViewingPhoto(false);
+                      }
+                    }}>
+                    <div style={S.mediaThumb}>
+                      {m.fileURL ? (
+                        m.fileType === "video"
+                          ? <video src={m.fileURL} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted />
+                          : <img src={m.fileURL} style={{ width: "100%", height: "100%", objectFit: "cover" }} alt={m.title} />
+                      ) : (
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#444" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+                      )}
+                      {m.fileType === "video" && (
+                        <div style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.7)", borderRadius: "3px", padding: "2px 5px", fontSize: "9px", color: "#ccc", letterSpacing: "1px" }}>VID</div>
+                      )}
+                      {m.fileType === "photo" && !isAdminMode && (
+                        <div style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.7)", borderRadius: "3px", padding: "2px 5px", fontSize: "9px", color: "#aaa", letterSpacing: "1px" }}>🖼</div>
+                      )}
                     </div>
-                    {/* delete & edit quick actions - Only in Admin Mode */}
-                    {isAdminMode && (
-                      <div style={{ position: "absolute", top: 4, left: 4, display: "flex", gap: "4px" }}>
-                        <button style={{ background: "rgba(0,0,0,0.75)", border: "none", color: "#ccc", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", fontSize: "11px", display: "flex", alignItems: "center", justifyContent: "center" }}
-                          onClick={(e) => { e.stopPropagation(); openAdd(m); }} title="Edit">✎</button>
-                        <button style={{ background: "rgba(229,9,20,0.8)", border: "none", color: "#fff", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", fontSize: "14px", display: "flex", alignItems: "center", justifyContent: "center" }}
-                          onClick={(e) => { e.stopPropagation(); setConfirm({ type: "media", id: m.id, label: m.title }); }} title="Delete">×</button>
+                    <div style={{ ...S.mediaLabel }}>
+                      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>{m.title}</span>
+                    </div>
+                  </div>
+                  {isAdminMode && (
+                    <div style={{ position: "absolute", top: 4, left: 4, display: "flex", gap: "4px", zIndex: 5 }}>
+                      <button style={{ background: "rgba(0,0,0,0.75)", border: "none", color: "#ccc", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", fontSize: "11px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                        onClick={(e) => { e.stopPropagation(); openAdd(m); }} title="Edit">✎</button>
+                      <button style={{ background: "rgba(229,9,20,0.8)", border: "none", color: "#fff", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", fontSize: "14px", display: "flex", alignItems: "center", justifyContent: "center" }}
+                        onClick={(e) => { e.stopPropagation(); setConfirm({ type: "media", id: m.id, label: m.title }); }} title="Delete">×</button>
+                    </div>
+                  )}
+                </div>
+              );
+
+              return (
+                <>
+                  {/* Hero Banner */}
+                  <div style={S.hero}>
+                    {bannerHero?.fileURL ? (
+                      bannerHero.fileType === "video"
+                        ? <video key={bannerHero.id} style={S.heroMedia} src={bannerHero.fileURL} autoPlay muted loop playsInline />
+                        : <img key={bannerHero.id} style={S.heroMedia} src={bannerHero.fileURL} alt={bannerHero.title} />
+                    ) : (
+                      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="1"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
                       </div>
                     )}
+                    <div style={S.heroGradient} />
+                    <div style={S.heroInfo}>
+                      <div style={{ ...S.heroBadge, background: c.accent || "#e50914" }}>{bannerHero?.category || activeProfile.year}</div>
+                      <div style={S.heroTitle}>{bannerHero?.title || "Select a memory"}</div>
+                      <div style={S.heroSummary}>{bannerHero?.summary || "Click any card below to feature it here."}</div>
+                      {bannerHero && (
+                        <div style={S.heroActions}>
+                          {bannerHero.fileType === "photo" && !isAdminMode ? (
+                            <button style={{ ...S.heroBtn, background: "#fff", color: "#000" }}
+                              onClick={() => openPhotoViewer(bannerHero)}>
+                              🖼 View Photo
+                            </button>
+                          ) : (
+                            <button style={{ ...S.heroBtn, background: "#fff", color: "#000" }}
+                              onClick={() => bannerHero.fileURL && window.open(bannerHero.fileURL, "_blank")}>
+                              ▶ Open
+                            </button>
+                          )}
+                          <button style={{ ...S.heroBtn, background: "rgba(100,100,100,0.5)", color: "#fff" }}
+                            onClick={startSlideshow}>
+                            ⧉ Slideshow
+                          </button>
+                          {isAdminMode && (
+                            <button style={{ ...S.heroBtn, background: "rgba(100,100,100,0.3)", color: "#fff" }}
+                              onClick={() => openAdd(bannerHero)}>
+                              ✎ Edit
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                ))}
-              </div>
-            </div>
 
-            {/* Add button - Only in Admin Mode */}
+                  {/* Category Rows */}
+                  {filtered.length === 0 && (
+                    <div style={{ ...S.section }}>
+                      <div style={S.empty}>{search ? "No memories match your search." : "No memories yet — add your first!"}</div>
+                    </div>
+                  )}
+
+                  {catOrder.map((cat) => (
+                    <div key={cat} style={{ padding: "1rem 0 0.5rem" }}>
+                      {/* Row title */}
+                      <div style={{ ...S.sectionTitle, padding: "0 clamp(1rem, 4vw, 2rem)", marginBottom: "0.6rem", display: "flex", alignItems: "center", gap: "8px" }}>
+                        {cat}
+                        {categoryMusicTracks[cat] && <span style={{ color: "#e50914", fontSize: "12px" }}>♫</span>}
+                        <span style={{ fontSize: "11px", color: "#444", fontWeight: "400", letterSpacing: "0" }}>({catMap[cat].length})</span>
+                      </div>
+                      {/* Horizontal scroll row */}
+                      <div style={{
+                        display: "flex", gap: "10px", overflowX: "auto", overflowY: "visible",
+                        padding: "6px clamp(1rem, 4vw, 2rem) 16px",
+                        scrollbarWidth: "none",
+                        msOverflowStyle: "none",
+                      }} className="netflix-row">
+                        {catMap[cat].map(renderCard)}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
+
+            {/* Add button */}
             {isAdminMode && (
               <div style={{ padding: "0 clamp(1rem, 4vw, 2rem) 2rem" }}>
                 <button style={S.addBtn}
@@ -761,7 +1514,7 @@ export default function Memflix() {
         );
       })()}
 
-      {/* ── SLIDESHOW ─────────────────────────────── */}
+      {/* ── MANUAL SLIDESHOW ──────────────────────── */}
       {showSlideshow && ssItem && (
         <div style={S.slideshowOverlay} onClick={() => { if (!slideshowPlay) setShowSlideshow(false); }}>
           {ssItem.fileURL ? (
@@ -793,32 +1546,117 @@ export default function Memflix() {
 
       {/* ── ADD / EDIT MODAL ──────────────────────── */}
       {showAddModal && (
-        <div style={S.modalOverlay} onClick={() => setShowAddModal(false)}>
-          <div style={S.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={S.modalTitle}>{editItem ? "Edit memory" : `Add a memory${adminTargetProfile ? ` to ${adminTargetProfile.year}` : ""}`}</div>
-            <input style={S.input} value={modalState.title} onChange={(e) => setModalState((s) => ({ ...s, title: e.target.value }))} placeholder="My birthday trip…" />
-            <label style={S.label}>Your summary</label>
-            <textarea style={S.textarea} value={modalState.summary} onChange={(e) => setModalState((s) => ({ ...s, summary: e.target.value }))} placeholder="Write a personal note about this memory…" />
-            <label style={S.label}>Category (optional)</label>
-            <input style={S.input} value={modalState.category} onChange={(e) => setModalState((s) => ({ ...s, category: e.target.value }))} placeholder="e.g., Action, Drama, Family, Travel…" />
-            <label style={S.label}>Photo or video {editItem ? "(leave empty to keep existing)" : ""}</label>
-            <button style={S.fileBtn}
-              onMouseEnter={(e) => { e.target.style.borderColor = "#e50914"; e.target.style.color = "#fff"; }}
-              onMouseLeave={(e) => { e.target.style.borderColor = "rgba(255,255,255,0.15)"; e.target.style.color = "#888"; }}
-              onClick={() => fileInputRef.current?.click()}>
-              ↑ Choose file
-            </button>
-            <input ref={fileInputRef} type="file" accept="image/*,video/*" style={{ display: "none" }} onChange={handleFile} />
-            {modalState.fileName && <div style={{ fontSize: "11px", color: "#888", marginTop: "6px" }}>✓ {modalState.fileName}</div>}
-            {modalState.fileURL && modalState.fileType === "photo" && (
-              <img src={modalState.fileURL} style={{ width: "100%", marginTop: "8px", borderRadius: "6px", maxHeight: "120px", objectFit: "cover" }} alt="preview" />
+        <div style={S.modalOverlay} onClick={() => { if (!bulkUploading) setShowAddModal(false); }}>
+          <div style={{
+            ...S.modal,
+            maxWidth: editItem ? "380px" : "520px",
+            maxHeight: "90vh",
+            overflowY: "auto",
+            display: "flex", flexDirection: "column",
+          }} onClick={(e) => e.stopPropagation()}>
+
+            {/* ── EDIT MODE ── */}
+            {editItem ? (
+              <>
+                <div style={S.modalTitle}>Edit memory</div>
+                <input style={S.input} value={modalState.title} onChange={(e) => setModalState((s) => ({ ...s, title: e.target.value }))} placeholder="My birthday trip…" />
+                <label style={S.label}>Your summary</label>
+                <textarea style={S.textarea} value={modalState.summary} onChange={(e) => setModalState((s) => ({ ...s, summary: e.target.value }))} placeholder="Write a personal note…" />
+                <label style={S.label}>Category (optional)</label>
+                <input style={S.input} value={modalState.category} onChange={(e) => setModalState((s) => ({ ...s, category: e.target.value }))} placeholder="e.g., Family, Travel…" />
+                <label style={S.label}>Replace photo / video (optional)</label>
+                <button style={S.fileBtn}
+                  onMouseEnter={(e) => { e.target.style.borderColor = "#e50914"; e.target.style.color = "#fff"; }}
+                  onMouseLeave={(e) => { e.target.style.borderColor = "rgba(255,255,255,0.15)"; e.target.style.color = "#888"; }}
+                  onClick={() => fileInputRef.current?.click()}>
+                  ↑ Choose file
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*,video/*" style={{ display: "none" }} onChange={handleFile} />
+                {modalState.fileName && <div style={{ fontSize: "11px", color: "#888", marginTop: "6px" }}>✓ {modalState.fileName}</div>}
+                {modalState.fileURL && modalState.fileType === "photo" && (
+                  <img src={modalState.fileURL} style={{ width: "100%", marginTop: "8px", borderRadius: "6px", maxHeight: "120px", objectFit: "cover" }} alt="preview" />
+                )}
+                <div style={S.modalActions}>
+                  <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#2a2a2a", color: "#aaa", fontFamily: "'Georgia', serif" }}
+                    onClick={() => setShowAddModal(false)}>Cancel</button>
+                  <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#e50914", color: "#fff", fontFamily: "'Georgia', serif", fontWeight: "600" }}
+                    onClick={saveMedia}>Save changes</button>
+                </div>
+              </>
+            ) : (
+              /* ── BULK UPLOAD MODE ── */
+              <>
+                <div style={S.modalTitle}>
+                  Add memories{adminTargetProfile ? ` to ${adminTargetProfile.year}` : ""}
+                </div>
+
+                {/* Shared category + summary */}
+                <label style={S.label}>Category</label>
+                <input style={S.input} value={bulkCategory} onChange={(e) => setBulkCategory(e.target.value)} placeholder="e.g., Family, Travel, Birthday…" />
+                <label style={S.label}>Shared note (applies to all)</label>
+                <textarea style={{ ...S.textarea, minHeight: "60px" }} value={bulkSummary} onChange={(e) => setBulkSummary(e.target.value)} placeholder="A note for all these memories…" />
+
+                {/* Drop zone / pick button */}
+                <label style={S.label}>Photos & videos</label>
+                <button style={{ ...S.fileBtn, padding: "18px", fontSize: "13px", flexDirection: "column", gap: "6px" }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#e50914"; e.currentTarget.style.color = "#fff"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.15)"; e.currentTarget.style.color = "#888"; }}
+                  onClick={() => fileInputRef.current?.click()}>
+                  <span style={{ fontSize: "22px" }}>↑</span>
+                  <span>Select photos & videos</span>
+                  <span style={{ fontSize: "10px", color: "#555", letterSpacing: "1px" }}>You can pick multiple files at once</span>
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple style={{ display: "none" }} onChange={handleBulkFiles} />
+
+                {/* Preview grid */}
+                {bulkFiles.length > 0 && (
+                  <div style={{ marginTop: "12px" }}>
+                    <div style={{ fontSize: "11px", color: "#666", marginBottom: "8px", letterSpacing: "1px" }}>
+                      {bulkFiles.length} file{bulkFiles.length !== 1 ? "s" : ""} selected — you can edit each title below
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: "8px", maxHeight: "280px", overflowY: "auto", paddingRight: "4px" }}>
+                      {bulkFiles.map((bf, idx) => (
+                        <div key={bf.id} style={{ position: "relative", borderRadius: "6px", overflow: "hidden", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.08)" }}>
+                          {/* Thumbnail */}
+                          <div style={{ width: "100%", aspectRatio: "1/1", overflow: "hidden", position: "relative" }}>
+                            {bf.fileType === "video"
+                              ? <video src={bf.fileURL} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted />
+                              : <img src={bf.fileURL} style={{ width: "100%", height: "100%", objectFit: "cover" }} alt={bf.title} />
+                            }
+                            {bf.fileType === "video" && (
+                              <div style={{ position: "absolute", top: 3, right: 3, background: "rgba(0,0,0,0.7)", borderRadius: "3px", padding: "1px 4px", fontSize: "8px", color: "#ccc" }}>VID</div>
+                            )}
+                          </div>
+                          {/* Editable title */}
+                          <input
+                            style={{ ...S.input, fontSize: "10px", padding: "4px 6px", borderRadius: "0", border: "none", borderTop: "1px solid rgba(255,255,255,0.06)", background: "#111" }}
+                            value={bf.title}
+                            onChange={(e) => setBulkFiles((prev) => prev.map((f) => f.id === bf.id ? { ...f, title: e.target.value } : f))}
+                            placeholder="Title…"
+                          />
+                          {/* Remove button */}
+                          <button
+                            style={{ position: "absolute", top: 3, left: 3, background: "rgba(229,9,20,0.85)", border: "none", color: "#fff", width: "18px", height: "18px", borderRadius: "50%", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}
+                            onClick={() => setBulkFiles((prev) => prev.filter((f) => f.id !== bf.id))}
+                          >×</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={S.modalActions}>
+                  <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#2a2a2a", color: "#aaa", fontFamily: "'Georgia', serif" }}
+                    onClick={() => setShowAddModal(false)} disabled={bulkUploading}>Cancel</button>
+                  <button
+                    style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: bulkFiles.length === 0 ? "#555" : "#e50914", color: "#fff", fontFamily: "'Georgia', serif", fontWeight: "600" }}
+                    onClick={saveMedia}
+                    disabled={bulkFiles.length === 0 || bulkUploading}>
+                    {bulkUploading ? `Saving… (${bulkFiles.length})` : `Add ${bulkFiles.length > 0 ? bulkFiles.length + " " : ""}memor${bulkFiles.length === 1 ? "y" : "ies"}`}
+                  </button>
+                </div>
+              </>
             )}
-            <div style={S.modalActions}>
-              <button style={{ ...S.modalActions[0], flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#2a2a2a", color: "#aaa", fontFamily: "'Georgia', serif" }}
-                onClick={() => setShowAddModal(false)}>Cancel</button>
-              <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#e50914", color: "#fff", fontFamily: "'Georgia', serif", fontWeight: "600" }}
-                onClick={saveMedia}>{editItem ? "Save changes" : "Add memory"}</button>
-            </div>
           </div>
         </div>
       )}
