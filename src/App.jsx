@@ -1,66 +1,31 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  collection, doc, getDocs, setDoc, deleteDoc, onSnapshot,
+} from "firebase/firestore";
+import { db } from "./firebase";
+import { supabase, BUCKET } from "./supabase";
 
-// ── IndexedDB helpers ──────────────────────────────────────────────
-const DB_NAME = "memflix_db";
-const DB_VER = 4;
+// ── Firestore + Storage helpers ─────────────────────────────────────
+// Same function names/signatures as before (dbGetAll/dbPut/dbDelete/...)
+// so the rest of the app below didn't need to change — only what's
+// "under the hood" changed: data now lives in Firebase, shared by
+// everyone who opens the link, instead of one browser's IndexedDB.
 
-function openDB() {
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains("profiles"))
-        db.createObjectStore("profiles", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("media"))
-        db.createObjectStore("media", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("categories"))
-        db.createObjectStore("categories", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("musicTracks"))
-        db.createObjectStore("musicTracks", { keyPath: "id" });
-    };
-    req.onsuccess = (e) => res(e.target.result);
-    req.onerror = (e) => rej(e.target.error);
-  });
+async function dbGetAll(storeName) {
+  const snap = await getDocs(collection(db, storeName));
+  return snap.docs.map((d) => d.data());
 }
 
-async function dbGetAll(store) {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(store, "readonly");
-    const req = tx.objectStore(store).getAll();
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
+async function dbPut(storeName, item) {
+  await setDoc(doc(db, storeName, item.id), item, { merge: true });
 }
 
-async function dbPut(store, item) {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(item);
-    tx.oncomplete = () => res();
-    tx.onerror = () => rej(tx.error);
-  });
-}
-
-async function dbDelete(store, id) {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).delete(id);
-    tx.oncomplete = () => res();
-    tx.onerror = () => rej(tx.error);
-  });
+async function dbDelete(storeName, id) {
+  await deleteDoc(doc(db, storeName, id));
 }
 
 async function dbGetCategories() {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx = db.transaction("categories", "readonly");
-    const req = tx.objectStore("categories").getAll();
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
+  return dbGetAll("categories");
 }
 
 async function dbAddCategory(name) {
@@ -69,20 +34,28 @@ async function dbAddCategory(name) {
   return id;
 }
 
-// Save music as base64 so it persists across sessions
-async function dbSaveMusic(categoryId, fileBlob, fileName) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = e.target.result; // data:audio/...;base64,...
-      const id = `music_${categoryId}`;
-      const track = { id, categoryId, base64, fileName };
-      await dbPut("musicTracks", track);
-      resolve(track);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(fileBlob);
+// Upload any File/Blob to Supabase Storage and return its public URL
+async function uploadToStorage(fileBlob, path) {
+  const { error } = await supabase.storage.from(BUCKET).upload(path, fileBlob, {
+    cacheControl: "3600",
+    upsert: true,
   });
+  if (error) throw error;
+  const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+  return data.publicUrl;
+}
+
+// Upload music for a category to Storage; metadata + URL go to Firestore.
+// (Field is still called "base64" everywhere it's consumed below — it's
+// just a Storage URL now instead of an actual base64 string — kept the
+// name so nothing downstream needed renaming.)
+async function dbSaveMusic(categoryId, fileBlob, fileName) {
+  const path = `music/${categoryId}/${Date.now()}_${fileName}`;
+  const url = await uploadToStorage(fileBlob, path);
+  const id = `music_${categoryId}`;
+  const track = { id, categoryId, base64: url, fileName, storagePath: path };
+  await dbPut("musicTracks", track);
+  return track;
 }
 
 // ── Constants ──────────────────────────────────────────────────────
@@ -447,32 +420,40 @@ export default function Memflix() {
   const fileInputRef = useRef(null);
   const musicUploadRef = useRef(null);
 
-  // ── Load from IndexedDB ──────────────────────────────────────────
+  // ── Load from Firebase (seed once if empty, then listen live) ────
   useEffect(() => {
     (async () => {
+      // One-time check: seed defaults only if this is a totally fresh project
       let ps = await dbGetAll("profiles");
-      let ms = await dbGetAll("media");
       let cats = await dbGetCategories();
       if (ps.length === 0) {
         for (const p of DEFAULT_PROFILES) await dbPut("profiles", p);
-        ps = DEFAULT_PROFILES;
       }
       if (cats.length === 0) {
         const defaultCats = ["Featured", "Action", "Drama", "Comedy", "Family"];
         for (const cat of defaultCats) await dbAddCategory(cat);
       }
-      ps.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-      setProfiles(ps);
-      setAllMedia(ms);
-
-      const allMusic = await dbGetAll("musicTracks");
-      const musicMap = {};
-      for (const track of allMusic) musicMap[track.categoryId] = track;
-      setCategoryMusicTracks(musicMap);
-
       setLoaded(true);
     })();
+
+    // Live listeners — everyone viewing the link sees changes as they happen
+    const unsubProfiles = onSnapshot(collection(db, "profiles"), (snap) => {
+      const ps = snap.docs.map((d) => d.data());
+      ps.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      setProfiles(ps);
+    });
+    const unsubMedia = onSnapshot(collection(db, "media"), (snap) => {
+      setAllMedia(snap.docs.map((d) => d.data()));
+    });
+    const unsubMusic = onSnapshot(collection(db, "musicTracks"), (snap) => {
+      const musicMap = {};
+      snap.docs.forEach((d) => { musicMap[d.data().categoryId] = d.data(); });
+      setCategoryMusicTracks(musicMap);
+    });
+
+    return () => { unsubProfiles(); unsubMedia(); unsubMusic(); };
   }, []);
+
 
   // ── Music Engine ─────────────────────────────────────────────────
   // The audio element persists. We manage when to play/pause based on:
@@ -731,25 +712,22 @@ export default function Memflix() {
     setShowAddModal(true);
   };
 
-  // Read a File into a data-URL entry for bulk preview
-  const readFileAsEntry = (file) =>
-    new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (ev) => resolve({
-        id: `bf_${Date.now()}_${Math.random()}`,
-        fileName: file.name,
-        fileType: file.type.startsWith("video") ? "video" : "photo",
-        fileURL: ev.target.result,
-        title: file.name.replace(/\.[^.]+$/, ""),
-      });
-      reader.readAsDataURL(file);
-    });
+  // Build a lightweight local preview entry for a picked file.
+  // The actual upload to Storage happens later, in saveMedia.
+  const readFileAsEntry = (file) => ({
+    id: `bf_${Date.now()}_${Math.random()}`,
+    fileName: file.name,
+    fileType: file.type.startsWith("video") ? "video" : "photo",
+    fileURL: URL.createObjectURL(file), // local preview only
+    file, // raw File — uploaded to Storage on save
+    title: file.name.replace(/\.[^.]+$/, ""),
+  });
 
   // Multi-file pick (bulk mode)
   const handleBulkFiles = async (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
-    const entries = await Promise.all(files.map(readFileAsEntry));
+    const entries = files.map(readFileAsEntry);
     setBulkFiles((prev) => [...prev, ...entries]);
     e.target.value = "";
   };
@@ -758,30 +736,32 @@ export default function Memflix() {
   const handleFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      setModalState((s) => ({
-        ...s,
-        fileURL: ev.target.result,
-        fileType: file.type.startsWith("video") ? "video" : "photo",
-        fileName: file.name,
-        title: s.title || file.name.replace(/\.[^.]+$/, ""),
-      }));
-    };
-    reader.readAsDataURL(file);
+    setModalState((s) => ({
+      ...s,
+      fileURL: URL.createObjectURL(file), // local preview only
+      fileObj: file, // raw File — uploaded to Storage on save
+      fileType: file.type.startsWith("video") ? "video" : "photo",
+      fileName: file.name,
+      title: s.title || file.name.replace(/\.[^.]+$/, ""),
+    }));
     e.target.value = "";
   };
 
   // Save edited single item
   const saveEditedMedia = async () => {
-    const { title, summary, category, fileURL, fileType, fileName } = modalState;
+    const { title, summary, category, fileObj, fileType, fileName } = modalState;
     if (!title.trim()) return;
+    let fileURL = editItem.fileURL;
+    if (fileObj) {
+      const path = `media/${editItem.profileId}/${Date.now()}_${fileName}`;
+      fileURL = await uploadToStorage(fileObj, path);
+    }
     const updated = {
       ...editItem,
       title: title.trim(),
       summary: summary.trim() || "A cherished memory.",
       category: category.trim() || "Uncategorized",
-      ...(fileURL && fileURL !== editItem.fileURL ? { fileURL, fileType, fileName } : {}),
+      ...(fileObj ? { fileURL, fileType, fileName } : {}),
     };
     await dbPut("media", updated);
     setAllMedia((prev) => prev.map((m) => (m.id === editItem.id ? updated : m)));
@@ -791,7 +771,7 @@ export default function Memflix() {
     setAdminTargetProfile(null);
   };
 
-  // Save all bulk files at once
+  // Save all bulk files at once — uploads each file to Storage, then writes metadata to Firestore
   const saveBulkMedia = async () => {
     if (bulkFiles.length === 0) return;
     setBulkUploading(true);
@@ -801,13 +781,15 @@ export default function Memflix() {
     const newEntries = [];
     for (let i = 0; i < bulkFiles.length; i++) {
       const bf = bulkFiles[i];
+      const path = `media/${targetProfile.id}/${Date.now()}_${i}_${bf.fileName}`;
+      const fileURL = await uploadToStorage(bf.file, path);
       const entry = {
         id: `m_${Date.now()}_${i}`,
         profileId: targetProfile.id,
         title: (bf.title || bf.fileName).trim(),
         summary: sum,
         category: cat,
-        fileURL: bf.fileURL,
+        fileURL,
         fileType: bf.fileType,
         fileName: bf.fileName,
         createdAt: Date.now() + i,
@@ -912,6 +894,29 @@ export default function Memflix() {
 
       {/* ── INTRO ANIMATION ──────────────────────── */}
       {showIntro && <IntroAnimation onDone={() => setShowIntro(false)} />}
+
+      {/* ── STICKY MUTE BUTTON (fixed to viewport, stays put on scroll) ──── */}
+      {screen === "browser" && !isAdminMode && categoryMusicTracks[selectedCategory] && (
+        <button
+          style={{
+            position: "fixed", top: "14px", right: "14px", zIndex: 9999,
+            width: "44px", height: "44px", borderRadius: "50%",
+            border: "1px solid rgba(229,9,20,0.5)",
+            background: "rgba(10,10,10,0.85)", backdropFilter: "blur(6px)",
+            color: musicPlaying ? "#e50914" : "#666",
+            fontSize: "18px", cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.5)",
+            transition: "transform 0.15s, color 0.2s",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.08)")}
+          onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          onClick={() => setMusicPlaying((p) => !p)}
+          title={musicPlaying ? "Mute music" : "Unmute music"}
+        >
+          {musicPlaying ? "🔊" : "🔇"}
+        </button>
+      )}
 
       {/* ── IDLE SLIDESHOW ───────────────────────── */}
       {isIdle && idleSlides.length > 0 && (
