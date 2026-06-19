@@ -832,15 +832,22 @@ export default function Memflix() {
   };
 
   // ── Add year ─────────────────────────────────────────────────────
+  const [addingYear, setAddingYear] = useState(false);
   const addYear = async () => {
+    if (addingYear) return; // prevent double-submit (Enter + click, double-click, etc.)
     const y = newYear.trim();
     if (!y) return;
-    const idx = profiles.length % PALETTE.length;
-    const p = { id: `p_${Date.now()}`, year: y, colorIdx: idx, order: profiles.length };
-    await dbPut("profiles", p);
-    setProfiles((prev) => [...prev, p]);
-    setShowAddYear(false);
-    setNewYear("");
+    setAddingYear(true);
+    try {
+      const idx = profiles.length % PALETTE.length;
+      const p = { id: `p_${Date.now()}`, year: y, colorIdx: idx, order: profiles.length };
+      await dbPut("profiles", p);
+      setProfiles((prev) => [...prev, p]);
+      setShowAddYear(false);
+      setNewYear("");
+    } finally {
+      setAddingYear(false);
+    }
   };
 
   // ── Music upload ─────────────────────────────────────────────────
@@ -1678,8 +1685,8 @@ export default function Memflix() {
             <div style={S.modalActions}>
               <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#2a2a2a", color: "#aaa", fontFamily: "'Georgia', serif" }}
                 onClick={() => setShowAddYear(false)}>Cancel</button>
-              <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: "pointer", border: "none", background: "#e50914", color: "#fff", fontFamily: "'Georgia', serif", fontWeight: "600" }}
-                onClick={addYear}>Add</button>
+              <button style={{ flex: 1, padding: "9px", borderRadius: "6px", fontSize: "13px", cursor: addingYear ? "default" : "pointer", border: "none", background: addingYear ? "#555" : "#e50914", color: "#fff", fontFamily: "'Georgia', serif", fontWeight: "600" }}
+                onClick={addYear} disabled={addingYear}>{addingYear ? "Adding…" : "Add"}</button>
             </div>
           </div>
         </div>
